@@ -1,0 +1,7 @@
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/terraform.tfvars
+.env
+__pycache__/
+.idea
