@@ -3,6 +3,7 @@ terraform/.terraform.lock.hcl
 terraform/*.tfstate
 terraform/*.tfstate.backup
 terraform/terraform.tfvars
+terraform/tmp/
 .env
 __pycache__/
 *.pyc
