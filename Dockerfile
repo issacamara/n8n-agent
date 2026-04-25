@@ -8,8 +8,8 @@ ENV PORT=8080
 
 WORKDIR scripts/
 
-COPY requirements.txt .
-COPY main.py .
+COPY scripts/requirements.txt .
+COPY scripts/main.py .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
