@@ -282,14 +282,13 @@ def solar_forecast(request):
         )
 
         message = (
-            f"🌞 *Solar Production Forecast — {date}*\n\n - Bamako"
+            f"🌞 *Solar Production Forecast — Bamako —{date}*"
             f"⚡ Estimated Production: *{kwh} kWh*\n"
             f"🏠 Priority load: {PRIORITY_LOAD_KWH} kWh\n"
             f"⛏️ Mining rig (1100 W): run *{rig_run_hours}h* | off *{rig_off_hours}h*\n"
             f"🌤️ Conditions: {sky} ({avg_cloud}% avg cloud cover)\n"
             f"🌡️ Max Temperature: {max_temp}°C\n"
-            f"🌧️ Rain forecast: {rain} mm\n\n"
-            f"tilt 17°, south-east facing_"
+            f"🌧️ Rain forecast: {rain} mm"
         )
 
         twilio_result = _send_whatsapp(message)
