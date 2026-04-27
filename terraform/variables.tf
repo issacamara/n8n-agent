@@ -16,22 +16,11 @@ variable "function_name" {
   default     = "solar-forecast"
 }
 
-variable "schedule" {
-  description = "Cron schedule for the daily trigger"
-  type        = string
-  default     = "0 6 * * *"
-}
-
 variable "image" {
   description = "My personal Docker image"
   type = string
   default = "issacamara/solar-forecast:latest"
 
-}
-variable "timezone" {
-  description = "Scheduler timezone"
-  type        = string
-  default     = "Africa/Bamako"
 }
 
 variable "twilio_account_sid" {

@@ -283,14 +283,22 @@ resource "google_service_account" "scheduler_sa" {
   depends_on = [google_project_service.iam]
 }
 
-resource "google_cloud_run_service_iam_member" "scheduler_invoker" {
+# ─────────────────────────────────────────────
+# Grant Scheduler SA permission to invoke the
+# Cloud Function (which runs as a Cloud Run service)
+# Must target the Cloud Run service directly
+# ─────────────────────────────────────────────
+resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
   project  = var.project_id
   location = var.region
-  service  = google_cloudfunctions2_function.solar_forecast.name
+  name     = google_cloudfunctions2_function.solar_forecast.name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler_sa.email}"
 
-  depends_on = [google_cloudfunctions2_function.solar_forecast]
+  depends_on = [
+    google_cloudfunctions2_function.solar_forecast,
+    google_service_account.scheduler_sa
+  ]
 }
 
 # ─────────────────────────────────────────────
@@ -300,9 +308,14 @@ resource "google_cloud_scheduler_job" "daily_trigger" {
   name        = "solar-forecast-daily"
   region      = var.region
   project     = var.project_id
-  description = "Trigger solar forecast Cloud Function every morning"
-  schedule    = var.schedule
-  time_zone   = var.timezone
+  description = "Trigger solar forecast Cloud Function every morning at 6 AM Mali time"
+  schedule    = "0 6 * * *"
+  time_zone   = "Africa/Bamako"
+
+  # Retry only once to avoid duplicate WhatsApp messages
+  retry_config {
+    retry_count = 1
+  }
 
   http_target {
     http_method = "POST"
@@ -316,12 +329,14 @@ resource "google_cloud_scheduler_job" "daily_trigger" {
 
     oidc_token {
       service_account_email = google_service_account.scheduler_sa.email
-      audience              = google_cloudfunctions2_function.solar_forecast.service_config[0].uri
+
+      # Audience MUST exactly match the function URI — no trailing slash
+      audience = google_cloudfunctions2_function.solar_forecast.service_config[0].uri
     }
   }
 
   depends_on = [
     google_project_service.scheduler,
-    google_cloud_run_service_iam_member.scheduler_invoker
+    google_cloud_run_v2_service_iam_member.scheduler_invoker
   ]
 }
