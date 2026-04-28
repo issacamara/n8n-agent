@@ -36,14 +36,14 @@ MONO_ANNUAL_DEG = 0.006
 BIF_ANNUAL_DEG  = 0.004
 
 # ── Energy management ─────────────────────────────────────────────
-PRIORITY_LOAD_KWH = 27.5  # midpoint of 25–30 kWh/day household need
+PRIORITY_LOAD_KWH = 27.5  # midpoint of 25-30 kWh/day household need
 RIG_POWER_KW      = 1.1   # mining rig power consumption
 DAY_HOURS         = 24.0
 
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 # Degradation
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 def _degradation_factor(install_date: datetime, annual_rate: float, now: datetime) -> float:
     """Compute remaining power fraction based on age and annual degradation rate."""
@@ -51,9 +51,9 @@ def _degradation_factor(install_date: datetime, annual_rate: float, now: datetim
     return max(0.0, 1.0 - annual_rate * years)
 
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 # Solar geometry
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 def _solar_declination(day_of_year: int) -> float:
     """Solar declination angle in degrees (Cooper's equation)."""
@@ -115,17 +115,23 @@ def _iam_correction(aoi_deg: float) -> float:
     return max(0.0, min(1.0, iam))
 
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 # Weather forecast
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
-def _get_forecast() -> dict:
+def _get_forecast(days: int = 2) -> dict:
+    """
+    Fetch hourly forecast from Open-Meteo for the panel plane.
+    days=2 fetches today + tomorrow in a single API call.
+    global_tilted_irradiance is projected onto the panel surface
+    at the specified tilt and azimuth.
+    """
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={LATITUDE}&longitude={LONGITUDE}"
         "&hourly=global_tilted_irradiance,temperature_2m,cloud_cover,precipitation"
         f"&tilt={PANEL_TILT}&azimuth={180 + PANEL_AZIMUTH}"
-        "&forecast_days=1"
+        f"&forecast_days={days}"
         "&timezone=Africa%2FBamako"
     )
     resp = requests.get(url, timeout=30)
@@ -133,11 +139,45 @@ def _get_forecast() -> dict:
     return resp.json()
 
 
-# ─────────────────────────────────────────────────────────────────
+def _split_days(hourly: dict) -> tuple[dict, dict]:
+    """
+    Split hourly data (48 entries for 2 days) into two separate
+    day-sized dicts that _compute_production can process individually.
+    """
+    times      = hourly["time"]
+    today_date = times[0][:10]
+
+    today_idx    = [i for i, t in enumerate(times) if t.startswith(today_date)]
+    tomorrow_idx = [i for i, t in enumerate(times) if not t.startswith(today_date)]
+
+    def _slice(idx: list) -> dict:
+        return {
+            "time":                     [times[i] for i in idx],
+            "global_tilted_irradiance": [hourly["global_tilted_irradiance"][i] for i in idx],
+            "temperature_2m":           [hourly["temperature_2m"][i] for i in idx],
+            "cloud_cover":              [hourly.get("cloud_cover", [0]*len(times))[i] for i in idx],
+            "precipitation":            [hourly.get("precipitation", [0]*len(times))[i] for i in idx],
+        }
+
+    return _slice(today_idx), _slice(tomorrow_idx)
+
+
+# -----------------------------------------------------------------
 # Production estimate
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 def _compute_production(hourly: dict) -> tuple:
+    """
+    Estimate daily PV production in kWh from hourly GTI forecast.
+
+    Per hour:
+      1. GTI from Open-Meteo (W/m2 on panel plane)
+      2. IAM (ASHRAE) - oblique reflection losses
+      3. NOCT cell temperature model - thermal derating
+      4. Dynamic degradation from installation date
+      5. Seasonal bifacial rear-side gain
+      6. System performance ratio
+    """
     times = hourly["time"]
     gti   = hourly["global_tilted_irradiance"]
     temp  = hourly["temperature_2m"]
@@ -152,6 +192,7 @@ def _compute_production(hourly: dict) -> tuple:
     day_of_year = date_obj.timetuple().tm_yday
     month       = date_obj.month
 
+    # Dry season: bare soil has lower albedo -> reduced bifacial rear gain
     bifacial_seasonal = BIFACIAL_GAIN - (0.01 if month in [11, 12, 1, 2, 3] else 0.0)
 
     total_energy   = 0.0
@@ -190,13 +231,8 @@ def _compute_production(hourly: dict) -> tuple:
 
         eff_poa = poa * iam
 
-        mono_hour = (
-            (eff_poa / 1000.0) * MONO_KWP * BASE_PR * temp_factor * mono_deg
-        )
-
-        bif_hour = (
-            (eff_poa / 1000.0) * BIFACIAL_KWP * BASE_PR * temp_factor * bif_deg * bifacial_seasonal
-        )
+        mono_hour = (eff_poa / 1000.0) * MONO_KWP * BASE_PR * temp_factor * mono_deg
+        bif_hour  = (eff_poa / 1000.0) * BIFACIAL_KWP * BASE_PR * temp_factor * bif_deg * bifacial_seasonal
 
         total_energy += mono_hour + bif_hour
 
@@ -214,16 +250,16 @@ def _compute_production(hourly: dict) -> tuple:
     )
 
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 # Energy management
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 def _rig_schedule(kwh: float) -> tuple:
     """
     Determine safe mining rig runtime for the day.
 
     1. Priority household load is covered first (27.5 kWh).
-    2. Remaining energy is available for the rig at 1.1 kW.
+    2. Remaining energy goes to the rig at 1.1 kW.
     3. Runtime is capped at 24h.
     4. Off time = 24h - runtime.
     """
@@ -233,9 +269,20 @@ def _rig_schedule(kwh: float) -> tuple:
     return rig_run_hours, rig_off_hours
 
 
-# ─────────────────────────────────────────────────────────────────
+def _sky_label(avg_cloud: float, rain: float) -> str:
+    sky = "☀️ Sunny"
+    if avg_cloud > 70:
+        sky = "☁️ Overcast"
+    elif avg_cloud > 30:
+        sky = "⛅ Partly Cloudy"
+    if rain > 1:
+        sky += " 🌧️ Rain"
+    return sky
+
+
+# -----------------------------------------------------------------
 # Twilio WhatsApp
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 def _send_whatsapp(body: str) -> dict:
     client = Client(
@@ -250,30 +297,28 @@ def _send_whatsapp(body: str) -> dict:
     return {"sid": msg.sid, "status": msg.status}
 
 
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 # Cloud Function entrypoint
-# ─────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------
 
 @functions_framework.http
 def solar_forecast(request):
     try:
-        data   = _get_forecast()
+        # Single API call fetches today + tomorrow (forecast_days=2)
+        data   = _get_forecast(days=2)
         hourly = data["hourly"]
-        date   = hourly["time"][0][:10]
 
-        kwh, avg_cloud, rain, max_temp, month, doy, mono_deg, bif_deg = (
-            _compute_production(hourly)
+        today_hourly, tomorrow_hourly = _split_days(hourly)
+
+        today_date    = today_hourly["time"][0][:10]
+        tomorrow_date = tomorrow_hourly["time"][0][:10]
+
+        # --- Today ---
+        kwh_today, cloud_today, rain_today, temp_today, month, doy, mono_deg, bif_deg = (
+            _compute_production(today_hourly)
         )
-
-        rig_run_hours, rig_off_hours = _rig_schedule(kwh)
-
-        sky = "☀️ Sunny"
-        if avg_cloud > 70:
-            sky = "☁️ Overcast"
-        elif avg_cloud > 30:
-            sky = "⛅ Partly Cloudy"
-        if rain > 1:
-            sky += " 🌧️ Rain"
+        rig_run_hours, rig_off_hours = _rig_schedule(kwh_today)
+        sky_today = _sky_label(cloud_today, rain_today)
 
         season = (
             "🌵 Dry season"
@@ -281,27 +326,51 @@ def solar_forecast(request):
             else "🌧️ Wet season"
         )
 
+        # --- Tomorrow ---
+        kwh_tmrw, cloud_tmrw, rain_tmrw, temp_tmrw, _, _, _, _ = (
+            _compute_production(tomorrow_hourly)
+        )
+        rig_run_tmrw, rig_off_tmrw = _rig_schedule(kwh_tmrw)
+        sky_tmrw = _sky_label(cloud_tmrw, rain_tmrw)
+
         message = (
-            f"🌞 *Solar Production Forecast — Bamako —{date}*"
-            f"⚡ Estimated Production: *{kwh} kWh*\n"
+            f"🌞 *Solar Production Forecast — Bamako*\n\n"
+
+            f"━━━ 📅 Today — {today_date} ━━━\n"
+            f"📍 Day {doy}/365 | {season}\n"
+            f"⚡ Production: *{kwh_today} kWh*\n"
             f"🏠 Priority load: {PRIORITY_LOAD_KWH} kWh\n"
-            f"⛏️ Mining rig (1100 W): run *{rig_run_hours}h* | off *{rig_off_hours}h*\n"
-            f"🌤️ Conditions: {sky} ({avg_cloud}% avg cloud cover)\n"
-            f"🌡️ Max Temperature: {max_temp}°C\n"
-            f"🌧️ Rain forecast: {rain} mm"
+            f"⛏️ Mining rig: run *{rig_run_hours}h* | off *{rig_off_hours}h*\n"
+            f"🌤️ {sky_today} ({cloud_today}% cloud cover)\n"
+            f"🌡️ Max temp: {temp_today}°C | 🌧️ Rain: {rain_today} mm\n\n"
+
+            f"━━━ 🔭 Tomorrow — {tomorrow_date} ━━━\n"
+            f"⚡ Production: *{kwh_tmrw} kWh*\n"
+            f"⛏️ Mining rig: run *{rig_run_tmrw}h* | off *{rig_off_tmrw}h*\n"
+            f"🌤️ {sky_tmrw} ({cloud_tmrw}% cloud cover)\n"
+            f"🌡️ Max temp: {temp_tmrw}°C | 🌧️ Rain: {rain_tmrw} mm\n\n"
+
         )
 
         twilio_result = _send_whatsapp(message)
 
         return {
-            "ok":            True,
-            "date":          date,
-            "day_of_year":   doy,
-            "estimated_kwh": kwh,
+            "ok": True,
+            "today": {
+                "date":          today_date,
+                "day_of_year":   doy,
+                "estimated_kwh": kwh_today,
+                "rig_run_hours": rig_run_hours,
+                "rig_off_hours": rig_off_hours,
+            },
+            "tomorrow": {
+                "date":          tomorrow_date,
+                "estimated_kwh": kwh_tmrw,
+                "rig_run_hours": rig_run_tmrw,
+                "rig_off_hours": rig_off_tmrw,
+            },
             "mono_deg":      mono_deg,
             "bif_deg":       bif_deg,
-            "rig_run_hours": rig_run_hours,
-            "rig_off_hours": rig_off_hours,
             "twilio_sid":    twilio_result["sid"],
             "twilio_status": twilio_result["status"],
         }, 200
